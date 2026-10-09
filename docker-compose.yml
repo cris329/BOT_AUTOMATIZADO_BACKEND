@@ -1,0 +1,56 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: sofia-consulta-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sofia_consulta
+      POSTGRES_USER: sofia
+      POSTGRES_PASSWORD: sofia_local_pass
+    volumes:
+      - sofia_pg:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sofia -d sofia_consulta"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sofia-consulta-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DISPLAY: ":99"
+      DATABASE_URL: postgresql+psycopg2://sofia:sofia_local_pass@db:5432/sofia_consulta
+      CORS_ORIGINS: http://localhost:9082,http://127.0.0.1:9082
+    shm_size: "512mb"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8095:8090"
+    volumes:
+      - sofia_data:/srv/sofia-consulta/storage
+
+  frontend:
+    build:
+      context: ../SOFIA-CONSULTA-FRONTEND
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api/v1
+    container_name: sofia-consulta-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:9082:80"
+
+volumes:
+  sofia_pg:
+  sofia_data:

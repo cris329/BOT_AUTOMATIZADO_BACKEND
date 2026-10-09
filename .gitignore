@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+storage/*.db
+storage/sofia_diagnostico/
+storage/betowa_diagnostico/
+storage/sofia_session/
+*.egg-info/
+.idea/
+.vscode/
