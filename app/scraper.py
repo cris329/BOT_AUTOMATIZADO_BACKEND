@@ -67,6 +67,18 @@ BROWSER_FLAGS = [
     "--disable-client-side-phishing-detection",
     "--disable-popup-blocking",
 ]
+# Render free (512 MB): Chromium se mata por RAM si no recortamos procesos/GPU.
+if os.getenv("SOFIA_LOW_MEM", "").lower() in ("1", "true", "yes") or os.getenv("RENDER"):
+    BROWSER_FLAGS.extend(
+        [
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--renderer-process-limit=1",
+            "--js-flags=--max-old-space-size=128",
+            "--mute-audio",
+        ]
+    )
 
 # Portal Sofía Plus (Docker/local): HTTP intencional; HTTPS :443 no responde aquí.
 JOSSO_SECURITY_CHECK_URL = ("http" + "://" + "senasofiaplus.edu.co/sofia/josso_security_check")
@@ -504,8 +516,19 @@ def _stealthy_fetch_kwargs() -> dict[str, Any]:
     }
 
 
+def _tope_espera_fetch(lote: bool) -> float:
+    """Uno: TIMEOUT+2 min (evita cuelgues de 45 min en Render). Lote: hasta 45 min."""
+    if lote:
+        return 45 * 60
+    return float(max(180, TIMEOUT_SEGUNDOS + 120))
+
+
 def _ejecutar_con_scrapling(
-    cred: Credenciales, action: Callable[[Page], None], worker_id: int = 0
+    cred: Credenciales,
+    action: Callable[[Page], None],
+    worker_id: int = 0,
+    *,
+    lote: bool = False,
 ) -> str | None:
     """Un fetch Scrapling por solicitud. No espero el cierre de Chromium."""
     err_msg: list[str | None] = [None]
@@ -530,9 +553,11 @@ def _ejecutar_con_scrapling(
             if err_msg[0] is None:
                 err_msg[0] = f"Error del scraper: {exc}"
 
-    # Tope alineado al lote del backend (45 min): el hang real era el cierre.
-    if not correr_fetch_hasta_trabajo(fetch, listo, 45 * 60):
-        return "el scraper Sofía no terminó las consultas a tiempo"
+    if not correr_fetch_hasta_trabajo(fetch, listo, _tope_espera_fetch(lote)):
+        return (
+            "el scraper Sofía no terminó a tiempo "
+            "(en Render free Chromium suele quedarse sin RAM; prueba de nuevo o sube de plan)"
+        )
     return err_msg[0]
 
 
@@ -3017,7 +3042,9 @@ def _ejecutar_flujo(ctx: ContextoScrape) -> None:
             )
             progreso.reportar(ctx.lote_id, doc.numero_documento, r.estado)
 
-    err = _ejecutar_con_scrapling(ctx.cred, consultar, worker_id=ctx.worker_id)
+    err = _ejecutar_con_scrapling(
+        ctx.cred, consultar, worker_id=ctx.worker_id, lote=ctx.lote
+    )
     if err and not ctx.resultados:
         for d in ctx.docs:
             r = _no_verificado(d.numero_documento, err)

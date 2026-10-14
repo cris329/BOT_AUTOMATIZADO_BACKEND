@@ -48,6 +48,18 @@ class TestSofiaFetchLote(unittest.TestCase):
 
         self.assertFalse(correr_fetch_hasta_trabajo(fetch, listo, timeout_s=0.2))
 
+    def test_hilo_muerto_no_espera_tope(self) -> None:
+        """Si Chromium/OOM mata el hilo, soltamos enseguida (no 45 min)."""
+        listo = threading.Event()
+
+        def fetch() -> None:
+            return
+
+        t0 = time.time()
+        ok = correr_fetch_hasta_trabajo(fetch, listo, timeout_s=30)
+        self.assertTrue(ok)
+        self.assertLess(time.time() - t0, 5.0)
+
     def test_envolver_senala_y_cierra(self) -> None:
         listo = threading.Event()
         pagina = _PaginaFalsa()

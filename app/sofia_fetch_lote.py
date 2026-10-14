@@ -58,4 +58,13 @@ def correr_fetch_hasta_trabajo(
 
     hilo = threading.Thread(target=_run, daemon=True)
     hilo.start()
-    return trabajo_listo.wait(timeout=max(1.0, timeout_s))
+    # Poll corto: si el hilo muere (OOM/crash Chromium) no esperamos todo el tope.
+    restante = max(1.0, timeout_s)
+    while restante > 0:
+        paso = min(2.0, restante)
+        if trabajo_listo.wait(timeout=paso):
+            return True
+        if not hilo.is_alive():
+            return trabajo_listo.is_set()
+        restante -= paso
+    return trabajo_listo.is_set()
