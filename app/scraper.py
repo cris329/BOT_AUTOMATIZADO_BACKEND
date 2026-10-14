@@ -21,6 +21,7 @@ from patchright.sync_api import Frame, Page
 from scrapling.fetchers import StealthyFetcher
 
 from app.sofia_fetch_lote import correr_fetch_hasta_trabajo, envolver_page_action
+from app import sofia_warm
 from app.config import (
     DEFAULT_ROL,
     DIAG_DIR,
@@ -638,9 +639,14 @@ def _en_pagina_login(page: Page) -> bool:
     return False
 
 
+def _cred_key(cred: Credenciales) -> str:
+    """Huella estable para reutilizar sesión solo con las mismas credenciales."""
+    return f"{cred.usuario}|{cred.tipo_documento}|{_rol_efectivo(cred)}"
+
+
 def warm_session() -> None:
-    """Hook opcional de precalentamiento; el flujo actual no lo requiere."""
-    return None
+    """Dejo listo el launcher de sesión caliente (idempotente)."""
+    sofia_warm.configure(lambda page_action: ejecutar_fetch(0, page_action))
 
 
 def _sanitize(s: str) -> str:
@@ -2885,9 +2891,9 @@ def _tipos_a_probar(tipo_codigo: str, *, lote: bool = False) -> list[str]:
     codigo = tipo_codigo.strip().upper()
     if codigo and codigo in SOFIA_CODIGO_A_TIPO:
         return [SOFIA_CODIGO_A_TIPO[codigo]]
-    if lote:
-        return list(TIPOS_CONSULTA_LOTE)
-    return list(TIPOS_CONSULTA)
+    # Auto-tipo (individual o lote): solo CC/TI/CE (antes 8 tipos = minutos).
+    del lote  # misma lista corta en ambos modos
+    return list(TIPOS_CONSULTA_LOTE)
 
 
 def _resultado_registrado(
@@ -3019,32 +3025,64 @@ def _buscar_documento(
     return _cerrar_busqueda_documento(numero, hubo_no_registrado, errores)
 
 
-def _ejecutar_flujo(ctx: ContextoScrape) -> None:
-    def consultar(page: Page) -> None:
-        for idx, doc in enumerate(ctx.docs):
-            # Entre documentos: recargar form para no arrastrar tipo/mensaje anterior.
-            if idx > 0:
-                _cargar_iframe_consultar_registro(page)
-                _esperar_formulario_consultar(page, timeout_ms=10000)
-            t0 = time.time()
-            r = _buscar_documento(
-                page, doc.numero_documento, doc.tipo_documento, lote=ctx.lote
-            )
-            ctx.resultados.append(r)
-            logger.info(
-                "verificado doc=%s estado=%s tipo=%s en %.1fs (worker=%s lote=%s)",
-                doc.numero_documento,
-                r.estado,
-                r.tipo_encontrado or "-",
-                time.time() - t0,
-                ctx.worker_id,
-                ctx.lote,
-            )
-            progreso.reportar(ctx.lote_id, doc.numero_documento, r.estado)
+def _consultar_docs_en_page(ctx: ContextoScrape, page: Page) -> None:
+    """Consulta todos los docs del contexto sobre una page ya en el formulario."""
+    for idx, doc in enumerate(ctx.docs):
+        if idx > 0:
+            _cargar_iframe_consultar_registro(page)
+            _esperar_formulario_consultar(page, timeout_ms=10000)
+        t0 = time.time()
+        r = _buscar_documento(
+            page, doc.numero_documento, doc.tipo_documento, lote=ctx.lote
+        )
+        ctx.resultados.append(r)
+        logger.info(
+            "verificado doc=%s estado=%s tipo=%s en %.1fs (worker=%s lote=%s)",
+            doc.numero_documento,
+            r.estado,
+            r.tipo_encontrado or "-",
+            time.time() - t0,
+            ctx.worker_id,
+            ctx.lote,
+        )
+        progreso.reportar(ctx.lote_id, doc.numero_documento, r.estado)
 
-    err = _ejecutar_con_scrapling(
-        ctx.cred, consultar, worker_id=ctx.worker_id, lote=ctx.lote
+
+def _ejecutar_flujo_warm(ctx: ContextoScrape) -> str | None:
+    """Reutiliza Chromium logueado; primera vez paga login, luego ~15 s/doc."""
+    warm_session()
+    estado = _FetchState()
+
+    def ensure(page: Page) -> str | None:
+        return _asegurar_consultar_registro(page, ctx.cred, estado)
+
+    def action(page: Page) -> None:
+        if not _en_formulario_consultar(page):
+            err = _asegurar_consultar_registro(page, ctx.cred, estado)
+            if err:
+                raise RuntimeError(err)
+        _consultar_docs_en_page(ctx, page)
+
+    return sofia_warm.run(
+        cred_key=_cred_key(ctx.cred),
+        ensure=ensure,
+        action=action,
+        timeout_s=_tope_espera_fetch(ctx.lote),
     )
+
+
+def _ejecutar_flujo(ctx: ContextoScrape) -> None:
+    # Uno a uno: sesión caliente. Lotes paralelos: fetch clásico por worker.
+    usar_warm = sofia_warm.enabled() and (not ctx.lote or SOFIA_PARALLEL_WORKERS <= 1)
+    if usar_warm:
+        err = _ejecutar_flujo_warm(ctx)
+    else:
+        err = _ejecutar_con_scrapling(
+            ctx.cred,
+            lambda page: _consultar_docs_en_page(ctx, page),
+            worker_id=ctx.worker_id,
+            lote=ctx.lote,
+        )
     if err and not ctx.resultados:
         for d in ctx.docs:
             r = _no_verificado(d.numero_documento, err)
