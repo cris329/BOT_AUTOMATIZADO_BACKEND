@@ -28,10 +28,16 @@ class Settings:
             ).split(",")
             if o.strip()
         ]
-        self.database_url = os.getenv(
+        raw_db = os.getenv(
             "DATABASE_URL",
             "postgresql+psycopg2://sofia:sofia_local_pass@127.0.0.1:5433/sofia_consulta",
         )
+        # Render entrega postgres://; SQLAlchemy/psycopg2 necesitan postgresql+psycopg2://
+        if raw_db.startswith("postgres://"):
+            raw_db = "postgresql+psycopg2://" + raw_db[len("postgres://") :]
+        elif raw_db.startswith("postgresql://"):
+            raw_db = "postgresql+psycopg2://" + raw_db[len("postgresql://") :]
+        self.database_url = raw_db
         self.sofia_enc_key = os.getenv("SOFIA_ENC_KEY", "")
         self.admin_email = os.getenv("ADMIN_EMAIL", "admin@local.test")
         self.admin_password = os.getenv("ADMIN_PASSWORD", "")
